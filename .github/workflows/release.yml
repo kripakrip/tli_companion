@@ -18,7 +18,7 @@ jobs:
             args: ''
 
     runs-on: ${{ matrix.platform }}
-    
+
     steps:
       - uses: actions/checkout@v4
 
@@ -30,9 +30,7 @@ jobs:
           cache-dependency-path: 'package-lock.json'
 
       - name: Install Rust stable
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -53,12 +51,12 @@ jobs:
           releaseName: 'TLI Companion v__VERSION__'
           releaseBody: |
             ## TLI Companion v__VERSION__
-            
+
             Автоматический трекер фарма для Torchlight Infinite.
-            
+
             ### Установка
             - **Windows**: Скачайте `.msi` или `.exe` файл ниже
-            
+
             ### Изменения
             См. [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
           releaseDraft: true
