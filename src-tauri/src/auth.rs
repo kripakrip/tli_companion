@@ -290,25 +290,37 @@ fn parse_query_param(url_path: &str, key: &str) -> Option<String> {
     None
 }
 
-const OAUTH_CALLBACK_PORT: u16 = 49733;
+// Порты для OAuth callback (пробуем несколько на случай блокировки)
+const OAUTH_CALLBACK_PORTS: &[u16] = &[49733, 49734, 49735, 49736, 49737];
 
-fn bind_localhost_callback() -> Result<std::net::TcpListener, String> {
-    // Fixed port so it can be whitelisted in Supabase redirect URLs.
-    let listener = std::net::TcpListener::bind(("127.0.0.1", OAUTH_CALLBACK_PORT))
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AddrInUse {
-                format!(
-                    "OAuth уже запущен (порт {} занят). Либо заверши вход в браузере, либо нажми «Отмена» и попробуй снова.",
-                    OAUTH_CALLBACK_PORT
-                )
-            } else {
-                format!("Cannot bind localhost callback port {}: {}", OAUTH_CALLBACK_PORT, e)
+fn bind_localhost_callback() -> Result<(std::net::TcpListener, u16), String> {
+    // Пробуем несколько портов на случай блокировки firewall
+    for &port in OAUTH_CALLBACK_PORTS {
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => {
+                if let Err(e) = listener.set_nonblocking(true) {
+                    log::warn!("Failed to set nonblocking on port {}: {}", port, e);
+                    continue;
+                }
+                log::info!("OAuth callback listener bound to port {}", port);
+                return Ok((listener, port));
             }
-        })?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| e.to_string())?;
-    Ok(listener)
+            Err(e) => {
+                log::warn!("Cannot bind port {}: {} (kind: {:?})", port, e, e.kind());
+                // Продолжаем пробовать другие порты
+            }
+        }
+    }
+    
+    // Если ни один порт не подошёл
+    Err(
+        "Не удалось открыть порт для авторизации. \
+        Возможные причины:\n\
+        • Windows Firewall блокирует приложение\n\
+        • Антивирус блокирует сетевой доступ\n\n\
+        Решение: добавьте TLI Companion в исключения брандмауэра \
+        или запустите приложение от имени администратора.".to_string()
+    )
 }
 
 async fn wait_for_localhost_callback(
@@ -528,8 +540,6 @@ async fn wait_for_localhost_callback_no_state(
     }
 }
 
-const OAUTH_REDIRECT_URI: &str = "http://127.0.0.1:49733/auth/callback";
-
 /// Direct Supabase OAuth with PKCE — no website proxy, more reliable.
 pub async fn sign_in_via_kripika(
     http: &reqwest::Client,
@@ -540,16 +550,20 @@ pub async fn sign_in_via_kripika(
     let (verifier, challenge) = generate_pkce_pair();
 
     // Bind callback listener BEFORE opening browser to avoid race.
-    let listener = bind_localhost_callback()?;
+    // Returns (listener, port) - port may vary if firewall blocks some.
+    let (listener, port) = bind_localhost_callback()?;
+    
+    // Build redirect URI with the actual bound port
+    let redirect_uri = format!("http://127.0.0.1:{}/auth/callback", port);
 
     // Direct Supabase OAuth URL with PKCE. Supabase will redirect to our localhost listener.
-    // IMPORTANT: OAUTH_REDIRECT_URI must be in Supabase's allowed Redirect URLs.
+    // IMPORTANT: All possible ports (49733-49737) must be in Supabase's allowed Redirect URLs.
     // NOTE: We don't pass our own `state` - Supabase manages state internally for the OAuth
     // flow with Discord. PKCE (code_verifier) provides cryptographic security.
     let authorize_url = format!(
         "{}/auth/v1/authorize?provider=discord&redirect_to={}&code_challenge={}&code_challenge_method=s256",
         cfg.url.trim_end_matches('/'),
-        urlencoding::encode(OAUTH_REDIRECT_URI),
+        urlencoding::encode(&redirect_uri),
         urlencoding::encode(&challenge),
     );
 
