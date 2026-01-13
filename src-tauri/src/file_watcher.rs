@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, EventKind};
+// notify импорты убраны - используем простой polling
 use log::{info, warn, error, debug};
 use tokio::sync::mpsc;
 
@@ -244,110 +244,26 @@ impl LogWatcher {
     }
     
     /// Остановить отслеживание
+    #[allow(dead_code)]
     pub fn stop(&self) {
         *self.running.lock().unwrap() = false;
     }
     
     /// Проверить, работает ли watcher
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         *self.running.lock().unwrap()
     }
     
     /// Получить текущую позицию в файле
+    #[allow(dead_code)]
     pub fn get_position(&self) -> u64 {
         *self.file_position.lock().unwrap()
     }
     
     /// Сбросить парсер (при начале новой сессии)
+    #[allow(dead_code)]
     pub fn reset_parser(&self) {
         self.parser.lock().unwrap().reset_slot_cache();
-    }
-}
-
-/// Альтернативный watcher на основе notify (для более надёжного отслеживания)
-pub struct NotifyLogWatcher {
-    log_path: PathBuf,
-    watcher: Option<RecommendedWatcher>,
-    parser: Arc<Mutex<LogParser>>,
-}
-
-impl NotifyLogWatcher {
-    pub fn new(log_path: PathBuf, parser: Arc<Mutex<LogParser>>) -> Self {
-        Self {
-            log_path,
-            watcher: None,
-            parser,
-        }
-    }
-    
-    /// Начать отслеживание с notify
-    pub fn start_notify(&mut self) -> notify::Result<mpsc::Receiver<LogEvent>> {
-        let (tx, rx) = mpsc::channel(1000);
-        let log_path = self.log_path.clone();
-        
-        let parser = self.parser.clone();
-        let file_position = Arc::new(Mutex::new(0u64));
-        
-        // Переходим в конец файла
-        if let Ok(metadata) = std::fs::metadata(&log_path) {
-            *file_position.lock().unwrap() = metadata.len();
-        }
-        
-        let parser_clone = parser.clone();
-        let file_position_clone = file_position.clone();
-        let tx_clone = tx.clone();
-        let log_path_clone = log_path.clone();
-        
-        let watcher = RecommendedWatcher::new(
-            move |res: notify::Result<notify::Event>| {
-                match res {
-                    Ok(event) => {
-                        if matches!(event.kind, EventKind::Modify(_)) {
-                            // Читаем новые строки
-                            if let Ok(file) = File::open(&log_path_clone) {
-                                let mut reader = BufReader::new(file);
-                                let pos = *file_position_clone.lock().unwrap();
-                                
-                                if reader.seek(SeekFrom::Start(pos)).is_ok() {
-                                    loop {
-                                        let mut line = String::new();
-                                        match reader.read_line(&mut line) {
-                                            Ok(0) => break,
-                                            Ok(bytes) => {
-                                                *file_position_clone.lock().unwrap() += bytes as u64;
-                                                
-                                                let line = line.trim_end();
-                                                if let Some(event) = parser_clone.lock().unwrap().parse_line(line) {
-                                                    let _ = tx_clone.blocking_send(event);
-                                                }
-                                            }
-                                            Err(_) => break,
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Watch error: {:?}", e);
-                    }
-                }
-            },
-            Config::default().with_poll_interval(Duration::from_millis(100)),
-        )?;
-        
-        // Начинаем отслеживать директорию логов
-        if let Some(parent) = log_path.parent() {
-            // Используем mut для вызова watch
-            let mut watcher = watcher;
-            watcher.watch(parent, RecursiveMode::NonRecursive)?;
-            self.watcher = Some(watcher);
-        }
-        
-        Ok(rx)
-    }
-    
-    pub fn stop(&mut self) {
-        self.watcher = None;
     }
 }

@@ -36,3 +36,6 @@ src-tauri/gen/
 # Lock files (optional - can keep if you want reproducible builds)
 # package-lock.json
 # Cargo.lock
+
+# Dev scripts (DB sync, parsing, etc.)
+scripts/

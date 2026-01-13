@@ -67,6 +67,9 @@ pub struct ItemInfo {
     pub name_cn: Option<String>,
     pub category: String,
     pub icon_url: Option<String>,
+    /// Флаг базовой валюты (её цена всегда = 1.0 и не может быть изменена)
+    #[serde(default)]
+    pub is_base_currency: bool,
 }
 
 /// Состояние текущей сессии фарма
@@ -94,6 +97,56 @@ pub struct FarmSessionState {
     pub drops: std::collections::HashMap<i64, i32>,
     /// ID предустановки (если выбрана)
     pub preset_id: Option<String>,
+    /// Сессия на паузе
+    #[serde(default)]
+    pub is_paused: bool,
+    /// Траты за сессию (ручной ввод, пресет)
+    #[serde(default)]
+    pub expenses: Vec<ExpenseEntry>,
+    /// Ручной дроп за сессию (для уников/экипировки)
+    #[serde(default)]
+    pub manual_drops: Vec<ManualDropEntry>,
+    /// Общее время сессии в секундах (обновляется фронтендом)
+    #[serde(default)]
+    pub session_duration_sec: i32,
+}
+
+/// Запись о расходе (ручной ввод)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpenseEntry {
+    /// Уникальный ID записи
+    pub id: String,
+    /// ID предмета из БД (если связан)
+    #[serde(default)]
+    pub game_id: Option<i64>,
+    /// Название (EN или произвольный текст)
+    pub name: String,
+    /// Русское название (если связан с БД)
+    #[serde(default)]
+    pub name_ru: Option<String>,
+    /// Количество
+    pub quantity: i32,
+    /// Цена за единицу (FE)
+    pub price: f64,
+}
+
+/// Ручной дроп (для уников/экипировки)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualDropEntry {
+    /// Уникальный ID записи
+    pub id: String,
+    /// ID предмета из БД (если связан)
+    #[serde(default)]
+    pub game_id: Option<i64>,
+    /// Название (EN или произвольный текст)
+    pub name: String,
+    /// Русское название (если связан с БД)
+    #[serde(default)]
+    pub name_ru: Option<String>,
+    /// Количество
+    pub quantity: i32,
+    /// Цена продажи (FE)
+    pub price: f64,
 }
 
 /// Агрегированный дроп для отображения
@@ -109,6 +162,10 @@ pub struct AggregatedDrop {
     pub price_updated_at: Option<DateTime<Utc>>,
     /// Признак устаревшей цены (старше TTL)
     pub price_is_stale: bool,
+    /// Цена из предыдущего сезона (нужен новый прайсчек)
+    pub is_previous_season: bool,
+    /// Название лиги откуда цена (SS10, SS11, etc)
+    pub league_name: Option<String>,
 }
 
 /// Настройки приложения
@@ -117,14 +174,41 @@ pub struct AppSettings {
     /// Путь к файлу логов (если пользователь указал вручную)
     pub custom_log_path: Option<String>,
     /// Автозапуск при старте Windows
+    #[serde(default)]
     pub auto_start: bool,
     /// Показывать в трее
+    #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
-    /// Язык интерфейса
+    /// Язык интерфейса (ru/en)
+    #[serde(default = "default_language")]
     pub language: String,
     /// URL API сервера
+    #[serde(default = "default_api_url")]
     pub api_url: String,
+    /// Ориентация интерфейса: vertical / horizontal
+    #[serde(default = "default_orientation")]
+    pub layout_orientation: String,
+    /// Направление выдвижных панелей: right/left (для vertical) или bottom/top (для horizontal)
+    #[serde(default = "default_panel_direction")]
+    pub panel_direction: String,
+    /// Ставка комиссии аукциона (0.0 - 1.0), по умолчанию 0.125 (12.5%)
+    #[serde(default = "default_auction_fee")]
+    pub auction_fee_rate: f64,
+    /// Прозрачность окна (0.5 - 1.0)
+    #[serde(default = "default_opacity")]
+    pub opacity: f64,
+    /// Всегда поверх окон
+    #[serde(default = "default_true")]
+    pub always_on_top: bool,
 }
+
+fn default_true() -> bool { true }
+fn default_language() -> String { "ru".to_string() }
+fn default_api_url() -> String { "https://www.kripika.com".to_string() }
+fn default_orientation() -> String { "vertical".to_string() }
+fn default_panel_direction() -> String { "right".to_string() }
+fn default_auction_fee() -> f64 { 0.125 }
+fn default_opacity() -> f64 { 1.0 }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -134,6 +218,11 @@ impl Default for AppSettings {
             minimize_to_tray: true,
             language: "ru".to_string(),
             api_url: "https://www.kripika.com".to_string(),
+            layout_orientation: "vertical".to_string(),
+            panel_direction: "right".to_string(),
+            auction_fee_rate: 0.125,
+            opacity: 1.0,
+            always_on_top: true,
         }
     }
 }
@@ -166,6 +255,8 @@ pub struct SessionStats {
     pub stale_price_lines: i32,
     /// Доход в час (расчётный)
     pub hourly_profit: f64,
+    /// Сессия на паузе
+    pub is_paused: bool,
 }
 
 /// Профиль пользователя kripika.com (public.profiles)

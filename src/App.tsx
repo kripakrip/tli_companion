@@ -17,6 +17,7 @@ interface SessionStats {
   avg_map_duration_sec: number;
   stale_price_lines: number;
   hourly_profit: number;
+  is_paused: boolean;
 }
 
 interface ItemInfo {
@@ -37,6 +38,10 @@ interface AggregatedDrop {
   unit_price: number;
   price_updated_at: string | null;
   price_is_stale: boolean;
+  /** Цена из предыдущего сезона (нужен новый прайсчек) */
+  is_previous_season: boolean;
+  /** Название лиги откуда цена */
+  league_name: string | null;
 }
 
 interface ItemDropEvent {
@@ -230,6 +235,7 @@ function App() {
         avg_map_duration_sec: 0,
         stale_price_lines: 0,
         hourly_profit: 0,
+        is_paused: false,
       });
       setDrops([]);
     } catch (err) {
@@ -583,9 +589,13 @@ function App() {
                 </div>
                 <span className="drop-value">
                   {drop.total_value > 0 ? (
-                    <span className={drop.price_is_stale ? "price-stale" : "price-ok"}>
+                    <span className={`${drop.price_is_stale ? "price-stale" : "price-ok"} ${drop.is_previous_season ? "price-old-season" : ""}`}>
                       {formatNumber(drop.total_value)}
-                      {drop.price_is_stale ? (
+                      {drop.is_previous_season ? (
+                        <span className="price-old-season-badge" title={`Цена из ${drop.league_name || 'прошлого сезона'}, нужен новый прайсчек`}>
+                          ⚠️ {drop.league_name || 'стар.'}
+                        </span>
+                      ) : drop.price_is_stale ? (
                         <span className="price-stale-badge">стар. {formatPriceAge(drop.price_updated_at)}</span>
                       ) : null}
                     </span>

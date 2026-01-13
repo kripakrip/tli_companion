@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use base64::Engine;
-use log::{debug, warn};
+use log::debug;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use rand::RngCore;
@@ -40,6 +40,7 @@ struct TokenResponse {
     access_token: String,
     refresh_token: String,
     expires_in: i64,
+    #[allow(dead_code)]
     token_type: String,
     user: Option<TokenResponseUser>,
 }
@@ -163,53 +164,6 @@ fn compute_expires_at(expires_in: i64) -> DateTime<Utc> {
     Utc::now() + Duration::seconds(expires_in.saturating_sub(30).max(0))
 }
 
-pub async fn sign_in_with_password(
-    http: &reqwest::Client,
-    cfg: &SupabaseConfig,
-    email: &str,
-    password: &str,
-) -> Result<AuthSession, String> {
-    let endpoint = format!(
-        "{}/auth/v1/token?grant_type=password",
-        cfg.url.trim_end_matches('/')
-    );
-
-    let body = serde_json::json!({
-        "email": email,
-        "password": password,
-    });
-
-    let resp = http
-        .post(endpoint)
-        .header("apikey", &cfg.anon_key)
-        .header("Authorization", format!("Bearer {}", cfg.anon_key))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Auth sign-in failed: {} {}", status, text));
-    }
-
-    let tok: TokenResponse = resp.json().await.map_err(|e| e.to_string())?;
-    if tok.token_type.to_lowercase() != "bearer" {
-        warn!("Unexpected token_type: {}", tok.token_type);
-    }
-
-    store_refresh_token(&tok.refresh_token)?;
-    debug!("Stored refresh token in keychain");
-
-    Ok(AuthSession {
-        access_token: tok.access_token,
-        expires_at: compute_expires_at(tok.expires_in),
-        user_id: tok.user.as_ref().and_then(|u| u.id.clone()),
-        user_email: tok.user.and_then(|u| u.email),
-    })
-}
-
 pub async fn refresh_access_token(
     http: &reqwest::Client,
     cfg: &SupabaseConfig,
@@ -266,12 +220,6 @@ fn generate_pkce_pair() -> (String, String) {
     (verifier, challenge)
 }
 
-fn generate_state() -> String {
-    let mut buf = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
-    base64url_no_pad(&buf)
-}
-
 fn parse_query_param(url_path: &str, key: &str) -> Option<String> {
     // url_path example: "/auth/callback?code=...&state=..."
     let idx = url_path.find('?')?;
@@ -323,73 +271,7 @@ fn bind_localhost_callback() -> Result<(std::net::TcpListener, u16), String> {
     )
 }
 
-async fn wait_for_localhost_callback(
-    listener: std::net::TcpListener,
-    expected_state: &str,
-    cancel: Arc<AtomicBool>,
-) -> Result<String, String> {
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("OAuth cancelled".to_string());
-        }
-        if std::time::Instant::now() > deadline {
-            return Err("OAuth timeout (no callback received)".to_string());
-        }
-        match listener.accept() {
-            Ok((mut stream, _addr)) => {
-                use std::io::{Read, Write};
-                let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]);
-                let first = req.lines().next().unwrap_or("");
-                // "GET /auth/callback?code=... HTTP/1.1"
-                let mut parts = first.split_whitespace();
-                let _method = parts.next().unwrap_or("");
-                let path = parts.next().unwrap_or("");
-
-                let state = parse_query_param(path, "state").unwrap_or_default();
-                let code = parse_query_param(path, "code");
-
-                let (status, body) = if state != expected_state {
-                    (
-                        "400 Bad Request",
-                        "<h3>Invalid state. You can close this window.</h3>".to_string(),
-                    )
-                } else if let Some(_code) = code {
-                    (
-                        "200 OK",
-                        "<h3>Login complete. You can close this window and return to TLI Companion.</h3>".to_string(),
-                    )
-                } else {
-                    (
-                        "400 Bad Request",
-                        "<h3>Missing code. You can close this window.</h3>".to_string(),
-                    )
-                };
-
-                let resp = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><html><body>{}</body></html>",
-                    status, body
-                );
-                let _ = stream.write_all(resp.as_bytes());
-                let _ = stream.flush();
-
-                if status.starts_with("200") {
-                    // safe unwrap: if 200 then code exists above
-                    return Ok(parse_query_param(path, "code").unwrap());
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    }
-}
-
-/// Simplified callback listener that doesn't verify state (PKCE provides security).
+/// Callback listener для OAuth (PKCE обеспечивает безопасность, state не проверяем).
 async fn wait_for_localhost_callback_no_state(
     listener: std::net::TcpListener,
     cancel: Arc<AtomicBool>,

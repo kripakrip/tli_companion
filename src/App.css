@@ -410,6 +410,23 @@
   color: #f59e0b;
 }
 
+/* Цена из предыдущего сезона */
+.price-old-season {
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.price-old-season-badge {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #f97316;
+  background: rgba(249, 115, 22, 0.15);
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: help;
+}
+
 .price-ok {
   color: var(--success);
 }

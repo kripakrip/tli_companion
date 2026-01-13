@@ -21,7 +21,10 @@ mod supabase_defaults;
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{Manager, Emitter};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
 use log::{info, warn, error, debug, LevelFilter};
 use env_logger::Builder;
 
@@ -29,6 +32,49 @@ use state::AppState;
 use file_watcher::{find_log_path, LogWatcher};
 use types::LogEvent;
 use log_parser::LogParser;
+
+// Rate limiting для crowd price upload
+// Максимум 10 запросов в 60 секунд на пользователя
+const PRICE_UPLOAD_RATE_LIMIT: u64 = 10;
+const PRICE_UPLOAD_WINDOW_SEC: u64 = 60;
+
+struct RateLimiter {
+    window_start: AtomicU64,
+    count: AtomicU64,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            window_start: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+        }
+    }
+    
+    fn check_and_increment(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        let window = self.window_start.load(Ordering::Relaxed);
+        
+        // Новое окно если прошло больше WINDOW секунд
+        if now - window >= PRICE_UPLOAD_WINDOW_SEC {
+            self.window_start.store(now, Ordering::Relaxed);
+            self.count.store(1, Ordering::Relaxed);
+            return true;
+        }
+        
+        // Проверяем лимит
+        let current = self.count.fetch_add(1, Ordering::Relaxed);
+        current < PRICE_UPLOAD_RATE_LIMIT
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref PRICE_RATE_LIMITER: RateLimiter = RateLimiter::new();
+}
 
 fn select_market_price(prices: &[f64]) -> Option<f64> {
     // В логах есть список unitPrices (обычно по одному значению на лот).
@@ -69,6 +115,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             info!("Setting up application...");
             
@@ -78,6 +125,42 @@ fn main() {
             // Создаём глобальное состояние
             let app_state = Arc::new(AppState::new(shared_parser.clone()));
             app.manage(app_state.clone());
+            
+            // Создаём меню для tray иконки
+            let show_item = MenuItem::with_id(app, "show", "Показать", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            
+            // Создаём tray иконку с меню
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            info!("Quit requested from tray menu");
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // Клик левой кнопкой - показать окно
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
             
             // Получаем handle для отправки событий в frontend
             let app_handle = app.handle().clone();
@@ -91,6 +174,11 @@ fn main() {
 
                 // Восстанавливаем кэш цен (чтобы цены сохранялись между сессиями и перезапусками).
                 state_clone.load_prices_cache_from_disk().await;
+                
+                // Восстанавливаем активную сессию (если было аварийное закрытие)
+                if state_clone.load_session_from_disk().await {
+                    info!("Restored active session from previous run");
+                }
 
                 let http = reqwest::Client::new();
                 let sb_cfg = state_clone.resolve_supabase_config().await;
@@ -141,19 +229,24 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let http = reqwest::Client::new();
 
-                // Периодический фоновый рефреш цен (каждую минуту)
+                // Периодический фоновый рефреш цен (каждую минуту) с поддержкой fallback на предыдущий сезон
                 if let Some(_cfg) = sb_cfg.clone() {
                     let state_for_task = state_clone.clone();
                     let http_for_task = http.clone();
                     tauri::async_runtime::spawn(async move {
                         loop {
                             if let Some(cfg) = state_for_task.resolve_supabase_config().await {
-                                match supabase_sync::fetch_current_prices(&http_for_task, &cfg).await {
+                                // Используем новую функцию с fallback на предыдущий сезон
+                                match supabase_sync::fetch_prices_with_fallback(&http_for_task, &cfg).await {
                                     Ok(rows) => {
-                                        state_for_task.merge_remote_prices(rows).await;
+                                        state_for_task.merge_prices_with_league(rows).await;
                                     }
                                     Err(e) => {
-                                        debug!("Supabase fetch_current_prices error: {}", e);
+                                        debug!("Supabase fetch_prices_with_fallback error: {}", e);
+                                        // Fallback на старый метод если новый не работает
+                                        if let Ok(legacy_rows) = supabase_sync::fetch_current_prices(&http_for_task, &cfg).await {
+                                            state_for_task.merge_remote_prices(legacy_rows).await;
+                                        }
                                     }
                                 }
                             }
@@ -226,28 +319,33 @@ fn main() {
                                     state_clone.update_price(price.game_id, selected).await;
 
                                     // Crowd price upload (optional): если пользователь залогинен.
-                                    if let Some(cfg) = sb_cfg.clone() {
-                                        let jwt = state_clone.get_valid_access_token(&http, &cfg).await;
-                                        if let Some(jwt) = jwt {
-                                            let prices = price.prices.clone();
-                                            let game_id = price.game_id;
-                                            let currency_id = price.currency_id;
-                                            let http2 = http.clone();
-                                            tauri::async_runtime::spawn(async move {
-                                                if let Err(e) = supabase_sync::upsert_market_price(
-                                                    &http2,
-                                                    &cfg,
-                                                    &jwt,
-                                                    game_id,
-                                                    &prices,
-                                                    currency_id,
-                                                )
-                                                .await
-                                                {
-                                                    debug!("Supabase upsert_market_price error: {}", e);
-                                                }
-                                            });
-                                        } 
+                                    // Rate limited: максимум 10 запросов в минуту
+                                    if PRICE_RATE_LIMITER.check_and_increment() {
+                                        if let Some(cfg) = sb_cfg.clone() {
+                                            let jwt = state_clone.get_valid_access_token(&http, &cfg).await;
+                                            if let Some(jwt) = jwt {
+                                                let prices = price.prices.clone();
+                                                let game_id = price.game_id;
+                                                let currency_id = price.currency_id;
+                                                let http2 = http.clone();
+                                                tauri::async_runtime::spawn(async move {
+                                                    if let Err(e) = supabase_sync::upsert_market_price(
+                                                        &http2,
+                                                        &cfg,
+                                                        &jwt,
+                                                        game_id,
+                                                        &prices,
+                                                        currency_id,
+                                                    )
+                                                    .await
+                                                    {
+                                                        debug!("Supabase upsert_market_price error: {}", e);
+                                                    }
+                                                });
+                                            } 
+                                        }
+                                    } else {
+                                        debug!("Price upload rate limited, skipping");
                                     }
                                 }
                                 
@@ -286,7 +384,19 @@ fn main() {
             commands::find_log_file,
             commands::set_log_path,
             commands::start_session,
+            commands::set_paused,
+            commands::update_session_duration,
+            commands::add_expense,
+            commands::remove_expense,
+            commands::get_expenses,
+            commands::search_items,
+            commands::get_cached_prices,
+            commands::add_manual_drop,
+            commands::remove_manual_drop,
+            commands::get_manual_drops,
             commands::end_session,
+            commands::get_session_history,
+            commands::delete_session_history,
             commands::get_session_stats,
             commands::get_drops,
             commands::is_session_active,
@@ -296,6 +406,7 @@ fn main() {
             commands::load_items_cache,
             commands::update_item_price,
             commands::get_log_path,
+            commands::check_log_status,
             commands::get_app_version,
             commands::open_url,
             commands::auth_status,
@@ -304,6 +415,16 @@ fn main() {
             commands::auth_sign_out,
             commands::get_my_profile,
         ])
+        .on_window_event(|window, event| {
+            // При закрытии окна - полностью выходим из приложения
+            // Это помогает корректно удалить tray иконку
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Не предотвращаем закрытие - просто выходим
+                let _ = api;
+                info!("Window close requested, exiting application");
+                window.app_handle().exit(0);
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
