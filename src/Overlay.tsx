@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import { open } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
@@ -185,6 +187,11 @@ const translations = {
     about: 'О программе',
     supportProject: 'Поддержать проект',
     visitWebsite: 'Перейти на сайт',
+    
+    // Updates
+    newVersion: 'Доступна новая версия',
+    update: 'Обновить',
+    updating: 'Обновление',
     madeWith: 'Сделано с',
     forCommunity: 'для сообщества TLI',
   },
@@ -302,6 +309,11 @@ const translations = {
     about: 'About',
     supportProject: 'Support Project',
     visitWebsite: 'Visit Website',
+    
+    // Updates
+    newVersion: 'New version available',
+    update: 'Update',
+    updating: 'Updating',
     madeWith: 'Made with',
     forCommunity: 'for TLI community',
   }
@@ -452,6 +464,11 @@ export function Overlay() {
   const [, setLogPath] = useState<string | null>(null);
   const [version, setVersion] = useState("");
   const [showLogModal, setShowLogModal] = useState(false);
+  
+  // Update state
+  const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings>({
     custom_log_path: null,
     auto_start: false,
@@ -713,6 +730,9 @@ export function Overlay() {
       }
     }
     init();
+    
+    // Проверяем обновления при запуске
+    checkForUpdates();
   }, []);
 
   // Save view mode on change
@@ -1300,6 +1320,52 @@ export function Overlay() {
     }
   };
 
+  // Проверка обновлений
+  const checkForUpdates = async () => {
+    try {
+      const update = await check();
+      if (update?.available) {
+        console.log("Update available:", update.version);
+        setUpdateAvailable(update.version);
+      }
+    } catch (e) {
+      console.log("Update check failed (normal in dev):", e);
+    }
+  };
+
+  // Скачать и установить обновление
+  const handleUpdate = async () => {
+    if (!updateAvailable) return;
+    
+    setIsUpdating(true);
+    setUpdateProgress(0);
+    
+    try {
+      const update = await check();
+      if (!update?.available) return;
+
+      // Скачиваем и устанавливаем с прогрессом
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started" && event.data.contentLength) {
+          setUpdateProgress(0);
+        } else if (event.event === "Progress") {
+          const progress = event.data.chunkLength;
+          setUpdateProgress((prev) => Math.min((prev || 0) + progress / 1024 / 10, 99));
+        } else if (event.event === "Finished") {
+          setUpdateProgress(100);
+        }
+      });
+      
+      // Перезапускаем приложение
+      await relaunch();
+    } catch (e) {
+      console.error("Update failed:", e);
+      setIsUpdating(false);
+      setUpdateProgress(null);
+      alert("Ошибка обновления: " + String(e));
+    }
+  };
+
   const handleSelectLogFile = async () => {
     try {
       const selected = await open({
@@ -1412,6 +1478,22 @@ export function Overlay() {
 
   return (
     <div className={`overlay-container ${viewMode} ${orientationClass} ${directionClass}`}>
+      {/* Update Banner */}
+      {updateAvailable && (
+        <div className="update-banner">
+          {isUpdating ? (
+            <div className="update-progress">
+              {L('updating')}... {updateProgress !== null ? `${Math.round(updateProgress)}%` : ''}
+            </div>
+          ) : (
+            <>
+              <span>{L('newVersion')} v{updateAvailable}</span>
+              <button className="btn-update" onClick={handleUpdate}>{L('update')}</button>
+            </>
+          )}
+        </div>
+      )}
+      
       {/* Sidebar */}
       <div className="overlay-sidebar">
         <button 
