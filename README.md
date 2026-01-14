@@ -9,7 +9,7 @@ Desktop-приложение для автоматического трекин�
 </p>
 
 <p align="center">
-  <strong>▶️ Смотреть обзор на YouTube</strong>
+  <a href="https://youtu.be/KrTaA0yFJ0E"><strong>▶️ Смотреть обзор на YouTube</strong></a>
 </p>
 
 ---
